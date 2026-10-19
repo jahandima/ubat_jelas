@@ -2,7 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   UbatJelas — printed pharmacy label translator.
-  Lambda (FastAPI via Mangum) behind an HTTP API, static frontend on S3.
+  Lambda (FastAPI via Mangum) behind an HTTP API, static frontend on S3
+  served over HTTPS via CloudFront.
 
 Parameters:
   BedrockModelId:
@@ -67,13 +68,52 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${AWS::StackName}-frontend-${AWS::AccountId}"
-      WebsiteConfiguration:
-        IndexDocument: index.html
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-frontend-oac"
+        Description: Allow CloudFront to read the private frontend bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} frontend"
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref FrontendOriginAccessControl
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
 
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -81,19 +121,26 @@ Resources:
       Bucket: !Ref FrontendBucket
       PolicyDocument:
         Statement:
-          - Sid: PublicReadGetObject
+          - Sid: AllowCloudFrontRead
             Effect: Allow
-            Principal: "*"
+            Principal:
+              Service: cloudfront.amazonaws.com
             Action: s3:GetObject
             Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
 
 Outputs:
   ApiUrl:
     Description: API Gateway base URL
     Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
   FrontendUrl:
-    Description: S3 static website URL
-    Value: !GetAtt FrontendBucket.WebsiteURL
+    Description: HTTPS CloudFront URL for the static frontend
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
   FrontendBucketName:
     Description: S3 bucket name (used by the GitHub Actions workflow to upload index.html)
     Value: !Ref FrontendBucket
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (used to invalidate cache after frontend upload)
+    Value: !Ref FrontendDistribution

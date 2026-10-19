@@ -58,9 +58,12 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" --output text)
           BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name ubatjelas \
             --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+          CF_DIST_ID=$(aws cloudformation describe-stacks --stack-name ubatjelas \
+            --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" --output text)
           echo "api_url=$API_URL" >> "$GITHUB_OUTPUT"
           echo "frontend_url=$FRONTEND_URL" >> "$GITHUB_OUTPUT"
           echo "bucket_name=$BUCKET_NAME" >> "$GITHUB_OUTPUT"
+          echo "cf_dist_id=$CF_DIST_ID" >> "$GITHUB_OUTPUT"
 
       - name: Inject API URL into frontend
         run: |
@@ -69,7 +72,14 @@ jobs:
       - name: Upload frontend
         run: |
           aws s3 cp frontend/index.html "s3://${{ steps.outputs.outputs.bucket_name }}/index.html" \
-            --content-type text/html
+            --content-type text/html \
+            --cache-control "max-age=0, must-revalidate"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.outputs.outputs.cf_dist_id }}" \
+            --paths "/index.html" "/"
 
       - name: Print URLs
         run: |

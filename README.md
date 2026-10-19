@@ -6,7 +6,8 @@ AWS CendekiAwan — GenAI Innovation Challenge.
 **⚠️ This README replaces an earlier version that assumed a Docker + App
 Runner deployment on a different timeline. That path is gone.** This app now
 follows the competition's own required pipeline: **GitHub Actions → SAM →
-Lambda → API Gateway**, with the frontend as a static site on S3.
+Lambda → API Gateway**, with the frontend as a static site on S3 behind
+CloudFront (HTTPS).
 
 ## Architecture
 
@@ -20,7 +21,8 @@ Lambda → API Gateway**, with the frontend as a static site on S3.
 - `backend/lambda/lambda_handler.py` — thin Mangum wrapper so API Gateway can
   invoke the FastAPI app as a Lambda function.
 - `infra/template.yaml` — SAM template: one Lambda function behind an HTTP
-  API, plus an S3 bucket configured for static website hosting.
+  API, a private S3 bucket for the static frontend, and a CloudFront
+  distribution that serves it over HTTPS (`*.cloudfront.net` default cert).
 - `frontend/index.html` — a plain HTML/JS frontend replacing the Streamlit
   UI (Streamlit needs a running server; it can't be a static S3 file).
   Mirrors the original PartyRock widget flow: Photo Ubat → Extracted Label
@@ -61,11 +63,18 @@ Lambda → API Gateway**, with the frontend as a static site on S3.
    base64-encodes binary uploads (~33% overhead), so a 10MB photo would
    already be over budget. Don't raise this without also moving to a
    presigned-S3-upload flow.
-5. **Notifications require HTTPS.** The browser Notification API won't fire
-   on a plain S3 website endpoint (HTTP only). The frontend already falls
-   back to an in-page alert + audio beep so reminders still work — just
-   don't expect a native OS notification unless you later put the site
-   behind CloudFront with a certificate.
+5. **Notifications need the CloudFront URL.** The browser Notification API
+   only works on HTTPS. Open the printed `https://xxxx.cloudfront.net` URL,
+   not the old `http://...s3-website-...` endpoint (that hosting is gone;
+   the bucket is private and only CloudFront can read it). The frontend
+   still falls back to an in-page alert + audio beep if permission is
+   denied.
+6. **`github-deployer` IAM needs CloudFront.** If SAM deploy fails on
+   `AWS::CloudFront::Distribution` / `OriginAccessControl`, or the
+   invalidation step fails, add `cloudfront:*` (or at least create/update
+   distribution, origin access control, and `CreateInvalidation`) to that
+   user. The first CloudFront deploy can take 5–15 minutes while the
+   distribution rolls out.
 
 ## Local test before deploying
 
@@ -85,9 +94,9 @@ For the frontend, replace `__API_URL_PLACEHOLDER__` in `frontend/index.html`
 with `http://localhost:8000` temporarily and open the file directly in a
 browser. **Revert it back to `__API_URL_PLACEHOLDER__` before you commit** —
 `deploy.yml`'s `sed` step only replaces that exact placeholder string, so if
-this edit is still in place when you push, the live S3 frontend will keep
-pointing at your laptop's localhost instead of the real API Gateway URL, and
-`sed` won't complain, it'll just silently do nothing.
+this edit is still in place when you push, the live CloudFront frontend will
+keep pointing at your laptop's localhost instead of the real API Gateway URL,
+and `sed` won't complain, it'll just silently do nothing.
 
 ## Deploying (follow the competition guide's Steps 5–8 as written)
 
@@ -98,7 +107,7 @@ step prints both URLs:
 
 ```
 ✅ API URL: https://xxxxx.execute-api.ap-southeast-1.amazonaws.com
-✅ Frontend URL: http://<bucket>.s3-website-ap-southeast-1.amazonaws.com
+✅ Frontend URL: https://xxxx.cloudfront.net
 ```
 
 ## Known MVP gaps (worth flagging to judges proactively)
