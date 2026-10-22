@@ -1,124 +1,185 @@
 # UbatJelas
 
-Medicine label & pharmacy jargon translator for elderly Malaysians. Built for
-AWS CendekiAwan — GenAI Innovation Challenge.
+**Photo in, plain language out.** UbatJelas explains printed pharmacy labels to elderly Malaysians and their caregivers, in English, Bahasa Malaysia, Tamil or Mandarin.
 
-**⚠️ This README replaces an earlier version that assumed a Docker + App
-Runner deployment on a different timeline. That path is gone.** This app now
-follows the competition's own required pipeline: **GitHub Actions → SAM →
-Lambda → API Gateway**, with the frontend as a static site on S3 behind
-CloudFront (HTTPS).
+Built by **Team MindSparks (Nilai University)** for the AWS CendekiAwan National Showcase.
+
+> A label that says `1 tab BD PRN` is explained once at the pharmacy counter. At home, alone, it is just shorthand. UbatJelas turns it into plain words and sets reminders.
+
+---
+
+## Features
+
+- **Snap, don't type.** Choose a language, upload a photo or PDF of a label. No account, no prompt.
+- **Plain-language explanation.** Decodes pharmacy shorthand (BD, TDS, PC, etc.) and shows it beside the exact text read from the label.
+- **Four languages.** English, Bahasa Malaysia, Tamil and Mandarin, for both the interface and the explanation.
+- **Label only, by design.** The model is instructed to explain only what is printed. Requests for advice beyond the label are redirected to a pharmacist or doctor.
+- **Stops on unreadable photos.** If too little text is extracted, the app halts and asks for a clearer photo instead of guessing.
+- **Editable reminders.** Dose times are proposed from the frequency and the meal relation (before or after food), and can be edited or switched off.
+
+> UbatJelas is a label-literacy aid, not a medical device. Always confirm with your doctor or pharmacist.
+
+---
 
 ## Architecture
 
-- `backend/lambda/app/` — the original FastAPI app (`main.py`, `models.py`,
-  `i18n.py`, `bedrock_service.py`, `llamaparse_service.py`,
-  `reminder_logic.py`). Routes and business logic are the same as the
-  original design; the OCR layer was swapped from Textract to LlamaParse
-  (Textract hit an account-level `SubscriptionRequiredException` that
-  wasn't fixable on our timeline — see `llamaparse_service.py`'s docstring
-  for the confidence-gate tradeoff that came with the swap).
-- `backend/lambda/lambda_handler.py` — thin Mangum wrapper so API Gateway can
-  invoke the FastAPI app as a Lambda function.
-- `infra/template.yaml` — SAM template: one Lambda function behind an HTTP
-  API, a private S3 bucket for the static frontend, and a CloudFront
-  distribution that serves it over HTTPS (`*.cloudfront.net` default cert).
-- `frontend/index.html` — a plain HTML/JS frontend replacing the Streamlit
-  UI (Streamlit needs a running server; it can't be a static S3 file).
-  Mirrors the original PartyRock widget flow: Photo Ubat → Extracted Label
-  Text → Decoded Instructions/Penjelasan Mudah → Kad Ubat, plus a client-side
-  reminder/alarm feature.
-- `.github/workflows/deploy.yml` — builds, deploys, and uploads the frontend
-  in one run.
+```mermaid
+flowchart LR
+    U["Phone / browser"] -->|"loads app over HTTPS"| CF["Amazon CloudFront"]
+    CF --> S3[("Amazon S3<br/>private bucket")]
+    U -->|"upload / translate / reminder"| APIGW["Amazon API Gateway<br/>(HTTP API)"]
+    APIGW --> L["AWS Lambda<br/>FastAPI + Mangum"]
+    L -->|"OCR"| LP["LlamaParse<br/>(third-party)"]
+    L -->|"explain label"| BR["Amazon Bedrock<br/>Claude Haiku 4.5"]
+```
 
-## Things to double-check before you run the deploy
+| Layer | Service |
+|---|---|
+| Frontend hosting | Amazon S3 (private) behind Amazon CloudFront (HTTPS) |
+| API | Amazon API Gateway (HTTP API) |
+| Backend | AWS Lambda, Python 3.12, FastAPI via Mangum |
+| OCR | LlamaParse (third-party, not AWS) |
+| Language model | Amazon Bedrock, Claude Haiku 4.5 |
+| Infrastructure as code | AWS SAM (CloudFormation) |
+| CI/CD | GitHub Actions |
 
-1. **Repository secrets — 4, not the guide's stock 3.** OCR runs through
-   LlamaParse, not Textract, so no `AmazonTextractFullAccess` grant is
-   needed on the `github-deployer` IAM user. But `deploy.yml` needs a 4th
-   secret beyond the guide's usual three:
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-   - `SAM_DEPLOY_BUCKET`
-   - `LLAMA_CLOUD_API_KEY` — from cloud.llamaindex.ai, passed to
-     `template.yaml`'s `LlamaCloudApiKey` parameter at deploy time.
-2. **Which AWS account/credentials you're actually using.** If you're on a
-   personal AWS account with a permanent IAM user (`AKIA...` keys, per the
-   guide's Step 2), the workflow as written works as-is with just
-   `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets. If you're on a
-   **team sandbox account** with temporary credentials (`ASIA...` keys), you
-   also need a session token — add an `AWS_SESSION_TOKEN` secret and an
-   `aws-session-token:` line in the `configure-aws-credentials` step, and
-   note that those credentials expire and will need refreshing.
-3. **Confirm the exact Bedrock model ID** in your account (Bedrock console →
-   Model catalog). `infra/template.yaml` defaults to
-   `global.anthropic.claude-haiku-4-5-20251001-v1:0` — the cross-region
-   inference profile ID our account needed (the bare
-   `anthropic.claude-haiku-4-5-20251001-v1:0` 404s here). Some accounts
-   need the bare ID instead. Override with
-   `--parameter-overrides BedrockModelId=<your-id>` in the SAM Deploy step
-   if the default 404s for you.
-4. **File size limit.** `MAX_FILE_SIZE_MB` is set to 4 in the template, not
-   10. Lambda has a 6MB synchronous payload limit, and API Gateway
-   base64-encodes binary uploads (~33% overhead), so a 10MB photo would
-   already be over budget. Don't raise this without also moving to a
-   presigned-S3-upload flow.
-5. **Notifications need the CloudFront URL.** The browser Notification API
-   only works on HTTPS. Open the printed `https://xxxx.cloudfront.net` URL,
-   not the old `http://...s3-website-...` endpoint (that hosting is gone;
-   the bucket is private and only CloudFront can read it). The frontend
-   still falls back to an in-page alert + audio beep if permission is
-   denied.
-6. **`github-deployer` IAM needs CloudFront.** If SAM deploy fails on
-   `AWS::CloudFront::Distribution` / `OriginAccessControl`, or the
-   invalidation step fails, add `cloudfront:*` (or at least create/update
-   distribution, origin access control, and `CreateInvalidation`) to that
-   user. The first CloudFront deploy can take 5–15 minutes while the
-   distribution rolls out.
+There is no database. The app stores nothing between requests.
 
-## Local test before deploying
+---
+
+## How it works
+
+1. **Upload.** The browser sends the image or PDF to `POST /upload`. PDFs are rasterized (first page only) with PyMuPDF.
+2. **OCR.** The image is sent to LlamaParse. If fewer than `MIN_CHARS_THRESHOLD` characters come back, the flow stops with a "try a clearer photo" message.
+3. **Explain.** The extracted text goes to `POST /translate`, which calls Claude Haiku 4.5 on Bedrock with a constrained system prompt and returns structured JSON (explanation, medicine name, frequency code, meal relation, duration).
+4. **Remind.** `POST /reminder` converts the frequency and meal relation into proposed reminder times.
+
+### API
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Health check |
+| `POST` | `/upload` | Multipart: `file` (JPEG, PNG or PDF), `session_language`. Returns the OCR text |
+| `POST` | `/translate` | JSON: `raw_text`, `session_language`. Returns the plain-language explanation |
+| `POST` | `/reminder` | JSON: `frequency_code`, `meal_relation`, `manual_times`, `session_language`. Returns proposed times |
+
+`session_language` is one of `en`, `ms`, `ta`, `zh`.
+
+### Shorthand the app recognizes
+
+| Code | Meaning | Code | Meaning |
+|---|---|---|---|
+| OD | once a day | AC | before food |
+| OM | every morning | PC | after food |
+| ON | every night | PO | by mouth |
+| BD | twice a day | tab | tablet |
+| TDS | three times a day | maks Nx/hari | maximum N times a day |
+| QID | four times a day | PRN | only when needed |
+
+Reminders are generated for OD, OM, ON, BD, TDS and QID. `PRN` has no fixed schedule, so the app offers manual reminders. A term the model cannot map confidently is flagged for the user to confirm with a pharmacist.
+
+---
+
+## Repository structure
+
+```
+.
+├── .github/workflows/deploy.yml   # GitHub Actions: build, deploy, upload frontend
+├── backend/lambda/
+│   ├── lambda_handler.py          # Lambda entry point (Mangum)
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py                # FastAPI routes
+│       ├── llamaparse_service.py  # OCR
+│       ├── bedrock_service.py     # Claude on Bedrock
+│       ├── i18n.py                # UI strings and the system prompt
+│       ├── reminder_logic.py      # Reminder rules
+│       └── models.py              # Request/response schemas
+├── frontend/index.html            # Single-page static frontend
+└── infra/template.yaml            # SAM template (Lambda, API, S3, CloudFront)
+```
+
+---
+
+## Configuration
+
+Lambda environment variables (set in `infra/template.yaml`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BEDROCK_MODEL_ID` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model or inference profile ID |
+| `LLAMA_CLOUD_API_KEY` | (required) | LlamaCloud key for OCR, passed as a NoEcho stack parameter |
+| `MAX_FILE_SIZE_MB` | `4` | Upload size limit |
+| `MIN_CHARS_THRESHOLD` | `20` | Minimum extracted characters for a readable label |
+| `CORS_ALLOW_ORIGINS` | `*` | Allowed origins |
+| `LLAMA_INDEX_CACHE_DIR` | `/tmp/llama_index` | Writable cache path on Lambda |
+
+---
+
+## Run locally
+
+Prerequisites: Python 3.12, AWS credentials with Bedrock access, and a LlamaCloud API key.
 
 ```bash
 cd backend/lambda
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt uvicorn
-export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=ap-southeast-1
-export BEDROCK_MODEL_ID=global.anthropic.claude-haiku-4-5-20251001-v1:0
-uvicorn app.main:app --reload --port 8000
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+export LLAMA_CLOUD_API_KEY="your-key"
+export AWS_REGION="ap-southeast-1"
+export MAX_FILE_SIZE_MB="4"
+uvicorn app.main:app --reload
 ```
 
-Quick smoke test without touching LlamaParse/Bedrock:
-`curl -X POST http://localhost:8000/reminder -H "Content-Type: application/json" -d '{"frequency_code":"BD"}'`
+Then open `frontend/index.html` with `API_URL` set to `http://localhost:8000`. Do not commit that change. The deploy workflow replaces the `__API_URL_PLACEHOLDER__` value with the real API URL.
 
-For the frontend, replace `__API_URL_PLACEHOLDER__` in `frontend/index.html`
-with `http://localhost:8000` temporarily and open the file directly in a
-browser. **Revert it back to `__API_URL_PLACEHOLDER__` before you commit** —
-`deploy.yml`'s `sed` step only replaces that exact placeholder string, so if
-this edit is still in place when you push, the live CloudFront frontend will
-keep pointing at your laptop's localhost instead of the real API Gateway URL,
-and `sed` won't complain, it'll just silently do nothing.
+`python backend/lambda/test_bedrock.py` checks which Bedrock model IDs work in your account and region.
 
-## Deploying (follow the competition guide's Steps 5–8 as written)
+---
 
-Upload these files to GitHub exactly as the guide describes, add all 4
-repository secrets (see checklist item 1 above — the guide's stock 3 plus
-`LLAMA_CLOUD_API_KEY`), then run the workflow from the Actions tab. The last
-step prints both URLs:
+## Deploy
 
+### With GitHub Actions
+
+1. In the repo, go to **Settings → Secrets and variables → Actions** and add:
+   - `AWS_ACCESS_KEY_ID`
+   - `AWS_SECRET_ACCESS_KEY`
+   - `AWS_SESSION_TOKEN` (required for temporary credentials)
+   - `LLAMA_CLOUD_API_KEY`
+2. Go to **Actions → Deploy UbatJelas → Run workflow**.
+3. When it finishes, the **Print URLs** step shows the API URL and the HTTPS frontend URL.
+
+The workflow builds with SAM, deploys the `ubatjelas` stack to `ap-southeast-1`, injects the API URL into `index.html`, uploads it to S3 and invalidates the CloudFront cache. The first CloudFront deploy can take 5 to 15 minutes. Temporary credentials expire, so refresh the secrets before each run.
+
+### Manually with SAM
+
+```bash
+sam build --template infra/template.yaml --base-dir .
+sam deploy --stack-name ubatjelas --resolve-s3 \
+  --capabilities CAPABILITY_IAM --region ap-southeast-1 \
+  --parameter-overrides LlamaCloudApiKey=YOUR_KEY
 ```
-✅ API URL: https://xxxxx.execute-api.ap-southeast-1.amazonaws.com
-✅ Frontend URL: https://xxxx.cloudfront.net
-```
 
-## Known MVP gaps (worth flagging to judges proactively)
+---
 
-- Reminders are held in browser memory only — closing the tab clears them.
-  There's no backend persistence or push notification service.
-- Tamil/Mandarin are offered in the language picker and passed to the
-  translation prompt, but the UI chrome (buttons, warnings) only has full
-  localized copy for English/Bahasa Malaysia — Tamil/Mandarin selections
-  fall back to English UI text.
-- PDF upload uses the first page only, rasterized in-Lambda — fine for a
-  single-page pharmacy label.
-- No automated tests were added in this pass; the guide's own error table
-  (Step 7) is your main debugging reference if the first deploy fails.
+## Limitations
+
+- **Upload size is 4 MB.** API Gateway base64-encodes uploads, so larger files exceed Lambda's 6 MB request limit.
+- **Readable-photo check is a heuristic.** LlamaParse gives no confidence score, so the app stops when fewer than 20 characters are extracted. A bad photo that still yields garbled text can pass.
+- **PDFs use the first page only.**
+- **Third-party OCR.** Label images are sent to LlamaParse. Review its data policy before any real-world use.
+- **Shorthand coverage is limited** to the list above. Unknown terms are flagged, not guessed.
+
+---
+
+## Roadmap
+
+- A large, growing short-form database so far more pharmacy abbreviations are decoded
+- In-app guide and multi-file upload
+- Pilot at government health clinics, with a QR code at the pharmacy counter and no system integration
+
+---
+
+## Team
+
+**Team MindSparks**, Nilai University. Built for the AWS CendekiAwan National Showcase.
